@@ -17,8 +17,9 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
-
-#include <linux/device.h>
+#include <linux/miscdevice.h>
+#include <linux/fs.h>
+//#include <linux/device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -62,6 +63,35 @@
 #define PIXEL_ROW8_REG			0x17
 #define SENSOR_FIRST_REG		0x80 // Pixel 1 low bits register
 #define SENSOR_LAST_REG			0xFF // Pixel 64 high bits register
+
+
+/*
+** This function will be called when we open the Misc device file
+*/
+static int miscdev_open(struct inode *inode, struct file *file)
+{
+    return 0;
+}
+
+/*
+** This function will be called when we close the Misc Device file
+*/
+static int miscdev_close(struct inode *inodep, struct file *filp)
+{
+    return 0;
+}
+
+/*
+** This function will be called when we write the Misc Device file
+*/
+static ssize_t miscdev_write(struct file *file, const char __user *buf,
+               size_t len, loff_t *ppos)
+{
+
+    return len; 
+}
+ 
+
 
 /* 
  * Low level access helper functions
@@ -146,6 +176,7 @@ enum amg88xx_interrupt_state {
 struct amg88xx {
 	struct i2c_client	*client;
 	struct gpio_desc	*int_gpio;
+    struct miscdevice miscdev_device;
 };
 
 /*
@@ -347,9 +378,9 @@ static int amg88xx_read_sensor(struct amg88xx *dev, s16 *res_array)
 	int i;
 	int ret;
     uint8_t buf[128];
+	struct i2c_msg msgs[2];
 
     buf[0] = SENSOR_FIRST_REG;
-	struct i2c_msg msgs[2];
     msgs[0].addr = dev->client->addr;
     msgs[0].flags = dev->client->flags;
     msgs[0].len = 1;
@@ -370,6 +401,36 @@ static int amg88xx_read_sensor(struct amg88xx *dev, s16 *res_array)
     }
 
 	return 0;
+}
+
+/*
+** This function will be called when we read the Misc Device file
+*/
+static ssize_t miscdev_read(struct file *filp, char __user *buf,
+                    size_t count, loff_t *f_pos)
+{
+    /* ToDo : protect with mutex */
+    int ret;
+    s16 res_array[64];
+     
+    struct amg88xx *dev = container_of(filp->private_data, struct amg88xx, miscdev_device);
+    if(*f_pos != 0)
+        return -EFAULT;
+    if(count != 128)
+        return -EFAULT;
+
+    ret = amg88xx_read_sensor(dev, res_array);
+    if(ret < 0) {
+        pr_err("amg88xx_read_sensor failed : %d\n", ret);
+        return ret;
+    }
+    
+    ret = copy_to_user(buf, res_array, count);
+    if(ret != 0) {
+        pr_err("copy_to_user failed : %d\n", ret);
+        return -EFAULT;
+    }
+    return 128;
 }
 
 static int amg88xx_read_interrupt_map(struct amg88xx *dev, u8 *res_array)
@@ -885,6 +946,16 @@ static const struct attribute_group amg88xx_attr_group = {
 	.attrs = amg88xx_attrs,
 };
 
+//File operation structure 
+static const struct file_operations fops = {
+    .owner          = THIS_MODULE,
+    .write          = miscdev_write,
+    .read           = miscdev_read,
+    .open           = miscdev_open,
+    .release        = miscdev_close,
+    .llseek         = no_llseek,
+};
+
 static int amg88xx_probe_new(struct i2c_client *client)
 {
 	int ret;
@@ -896,6 +967,16 @@ static int amg88xx_probe_new(struct i2c_client *client)
 	else
 		device->client = client;
 
+    device->miscdev_device.minor = MISC_DYNAMIC_MINOR,
+    device->miscdev_device.name = "amg88xx_sensor",
+    device->miscdev_device.fops = &fops,
+    
+    ret = misc_register(&device->miscdev_device);
+    if (ret) {
+        pr_err("misc_register failed : %d\n", ret);
+        return ret;
+    }
+    
 	device->int_gpio = devm_gpiod_get(&client->dev, "interrupt", GPIOD_IN);
 	if (IS_ERR(device->int_gpio)) {
 		dev_err(&client->dev, "Failed to get a gpio line for interrupt\n");
@@ -936,6 +1017,9 @@ static int amg88xx_remove(struct i2c_client *client)
 	int ret;
 	struct amg88xx *device = dev_get_drvdata(&client->dev);
 
+    misc_deregister(&device->miscdev_device);
+    pr_info("misc_register exit done!!!\n");
+    
 	ret = amg88xx_set_dev_mode(device, SLEEP_MODE);
 	if (ret < 0) {
 		dev_err(&client->dev, "Failed to put the device to sleep\n");
@@ -944,6 +1028,11 @@ static int amg88xx_remove(struct i2c_client *client)
 
 	return 0;
 }
+
+
+
+
+
 
 
 static const struct i2c_device_id amg88xx_id_table[] = {
@@ -968,7 +1057,39 @@ static struct i2c_driver amg88xx_driver = {
 	.remove	   = amg88xx_remove,
 	.id_table  = amg88xx_id_table,
 };
-module_i2c_driver(amg88xx_driver);
+//module_i2c_driver(amg88xx_driver);
+
+/*
+** Misc Init function
+*/
+static int __init misc_init(void)
+{
+    int error;
+ 
+    error = i2c_add_driver(&amg88xx_driver);
+    if (error) {
+        pr_err("i2c_add_driver failed : %d\n", error);
+        return error;
+    }
+
+     
+    pr_info("misc_register init done!!!\n");
+    return 0;
+    
+}
+
+/*
+** Misc exit function
+*/
+static void __exit misc_exit(void)
+{
+
+    
+     i2c_del_driver(&amg88xx_driver);
+}
+ 
+module_init(misc_init)
+module_exit(misc_exit)
 
 MODULE_VERSION("1.0");
 MODULE_AUTHOR("Iiro Vuorio <iiro.vuorio@gmail.com>");
