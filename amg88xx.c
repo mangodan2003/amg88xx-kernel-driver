@@ -346,17 +346,28 @@ static int amg88xx_read_sensor(struct amg88xx *dev, s16 *res_array)
 {
 	int i;
 	int ret;
-	u8 reg_addr = SENSOR_FIRST_REG;
+    uint8_t buf[128];
 
-	// Loop through all the sensor registers
-	for (i = 0; i < 64; i++) {
-		ret = amg88xx_read16(dev->client, reg_addr, reg_addr + 1);
-		if (ret < 0)
-			return ret;
+    buf[0] = SENSOR_FIRST_REG;
+	struct i2c_msg msgs[2];
+    msgs[0].addr = dev->client->addr;
+    msgs[0].flags = dev->client->flags;
+    msgs[0].len = 1;
+    msgs[0].buf = buf;
+    msgs[1].addr = dev->client->addr;
+    msgs[1].len = 128;
+    msgs[1].buf = &buf[0];
+    msgs[1].flags = I2C_M_RD | dev->client->flags;
+	ret = i2c_transfer(dev->client->adapter, &msgs[0], 2);
 
-		convert_to_s16(res_array[i], ret);
-		reg_addr += 2;
-	}
+    if(ret != 2)
+        return ret;
+
+    for(i=0; i < 64; i++) {
+        uint16_t v = buf[i*2 + 1] << 8;
+        v |= buf[i*2];
+        convert_to_s16(res_array[i], v);
+    }
 
 	return 0;
 }
@@ -398,7 +409,7 @@ static ssize_t show_sensor(struct device *dev, struct device_attribute *attr,
 
 	ret = amg88xx_read_sensor(device, sensor_array);
 	if (ret < 0) {
-		dev_err(dev, "Failed to read the sensor\n");
+		dev_err(dev, "Failed to read the sensor : %d\n", ret);
 		return ret;
 	}
 
@@ -916,7 +927,7 @@ static int amg88xx_probe_new(struct i2c_client *client)
 		dev_err(&client->dev, "Failed to add sysfs attributes\n");
 		return ret;
 	}
-
+	
 	return 0;
 }
 
